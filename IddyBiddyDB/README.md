@@ -289,8 +289,4 @@ closes politely on `versionchange` and rejects `ibOpenDatabase` with a clear
 | `IB_events.js` | Change bus + cross-tab BroadcastChannel |
 | `IB_schemas.js`, `IB_demo-*.js` | Examples: work-orders schema, grid/basic/worker demos |
 
-## Page indexing at zero
 
-The grid adapter treats `page` as **0-based** (matching current Web Awesome), and `ibOpenDatabase`
-returns the `ibDatabase` wrapper (the raw handle is `.raw`) so `db.table()`
-is available everywhere the old code passed `db` around.
