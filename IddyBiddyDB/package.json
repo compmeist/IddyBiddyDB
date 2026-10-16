@@ -1,0 +1,10 @@
+{
+  "name": "iddybiddy-db",
+  "version": "2.0.0",
+  "description": "IddyBiddyDB — a friendly, modular Promise shim for IndexedDB 3: tables, pipeline queries, grid adapter, and pluggable server sync.",
+  "type": "module",
+  "main": "IB_index.js",
+  "exports": { ".": "./IB_index.js" },
+  "scripts": { "test": "node --test tests/" },
+  "license": "MIT"
+}

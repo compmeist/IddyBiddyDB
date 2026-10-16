@@ -1,0 +1,83 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>IddyBiddyDB browser integration test</title>
+<body>RUNNING</body>
+<script type="module">
+// Real-IndexedDB integration test (needs a browser; Node tests cover logic).
+// Serve the IddyBiddyDB folder over http, open this page, read document.title.
+import { ibOpenDatabase, ibDeleteDatabase, ibCreateSyncEngine, ibQueryStore, ibWorkOrderStores, ibSeedWorkOrder } from '../IB_index.js';
+
+const results = [];
+const check = (name, cond) => results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`);
+try {
+  const name = `iddy-biddy-test-${Date.now()}`;
+  const db = await ibOpenDatabase({ name, version: 1, stores: ibWorkOrderStores });
+  const seed = ibSeedWorkOrder();
+  for (const [store, rows] of Object.entries(seed)) await db.table(store).putAll(rows);
+
+  check('seed count', (await db.table('workOrders').count()) === 1);
+  check('get', (await db.table('people').get('P-1'))?.name === 'Ada');
+  await db.table('workOrders').update('WO-1', { status: 'done' });
+  check('single-record update', (await db.table('workOrders').get('WO-1'))?.status === 'done');
+  await db.table('workOrders').update('WO-1', (o) => ({ ...o, title: `${o.title}!` }));
+  check('function patch', (await db.table('workOrders').get('WO-1'))?.title === 'Fix pump!');
+
+  const byId = await db.table('people').getAllAsMap();
+  check('getAllAsMap', byId instanceof Map && byId.get('P-2')?.name === 'Bo');
+  await db.table('people').putMap(new Map([['P-9', { id: 'P-9', name: 'Zed' }]]));
+  check('putMap', (await db.table('people').get('P-9'))?.name === 'Zed');
+
+  const planned = db.from('workOrders').where({ status: 'done' });
+  check('index plan', planned.explain().source.strategy === 'index' && planned.explain().source.index === 'byStatus');
+  check('indexed query result', (await planned.toArray()).length === 1);
+
+  const nested = await db.from('workOrders')
+    .nest({ via: 'link', links: 'assignments', targets: 'people', parentKey: 'id', linkParent: 'workOrderId', linkTarget: 'personId', targetKey: 'id', as: 'assignees' })
+    .toArray();
+  check('link nest x3', nested[0]?.assignees?.length === 3);
+
+  let streamed = 0;
+  for await (const _p of db.table('people').stream()) streamed++;
+  check('stream', streamed === 4);
+
+  await db.tx(['workOrders', 'assignments'], 'readwrite', async (tx) => {
+    await tx.table('workOrders').put({ id: 'WO-2', title: 'Tx', status: 'open', createdAt: '2026-01-05' });
+    await tx.table('assignments').add({ workOrderId: 'WO-2', personId: 'P-1' });
+  });
+  check('multi-store tx', (await db.table('workOrders').get('WO-2'))?.title === 'Tx');
+
+  // Sync with hand-written (fake) backend functions: pull, mutate, syncOne.
+  let pushed = null;
+  const sync = ibCreateSyncEngine(db, {
+    pull: async () => ({ changes: [{ store: 'people', record: { id: 'P-10', name: 'Remote' } }], seq: 5 }),
+    push: async (batch) => { pushed = batch; },
+  });
+  await sync.pull();
+  check('sync pull', (await db.table('people').get('P-10'))?.name === 'Remote');
+  await sync.mutate('people', 'put', { id: 'P-11', name: 'Local' });
+  check('mutate queued', (await (await import('../IB_sync.js')).ibPendingMutations(db)).length === 1);
+  await sync.syncOne('people', 'P-11');
+  check('syncOne pushed single', pushed?.length === 1 && pushed[0]?.record?.name === 'Local');
+
+  const gridResult = await ibQueryStore(db, { baseStore: 'workOrders', searchFields: ['title'] },
+    { sort: [{ id: 'id', desc: false }], filters: [], search: '', page: 0, pageSize: 1 });
+  check('grid queryStore rows/total', gridResult.rows.length === 1 && gridResult.total === 2);
+
+  let liveSeen = 0;
+  const live = db.liveQuery(() => db.from('workOrders').toArray(), ['workOrders']);
+  live.subscribe((rows) => { liveSeen = rows.length; });
+  await db.table('workOrders').put({ id: 'WO-3', title: 'Live', status: 'open', createdAt: '2026-01-06' });
+  await new Promise((r) => setTimeout(r, 50));
+  check('liveQuery refresh', liveSeen === 3);
+  live.dispose();
+
+  db.close();
+  await ibDeleteDatabase(name);
+  check('cleanup', true);
+} catch (err) {
+  results.push(`FAIL exception: ${err?.message ?? err}`);
+}
+const failed = results.filter((r) => r.startsWith('FAIL')).length;
+document.title = failed ? `IddyBiddyDB FAIL: ${results.find((r) => r.startsWith('FAIL'))}` : 'IddyBiddyDB PASS';
+document.body.textContent = results.join('\n');
+</script>
