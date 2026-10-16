@@ -99,13 +99,10 @@ await db.tx(['orders', 'stock'], 'readwrite', async (tx) => {
 }, { durability: 'strict' });   // IDB 3: fsync before commit ('relaxed' for caches)
 ```
 
-> **Classic trap:** a transaction auto-commits the moment you `await`
-> something that is not an IndexedDB request (`fetch`, timers...). Do that
-> work *before* opening the transaction.
 
 ---
 
-## Pipelines: queries at every granularity
+## Pipelines: queries at  granularity
 
 ```js
 const { rows, total, plan } = await db.from('workOrders')
