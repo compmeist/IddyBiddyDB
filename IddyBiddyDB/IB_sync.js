@@ -277,10 +277,17 @@ export class ibSyncEngine {
       const change = e.detail;
       if (change?.store === 'outbox' || change?.store === 'meta') return;
       if (wanted && !wanted.has(change?.store)) return;
-      void ibEnqueueMutation(this.db, {
-        store: change.store, op: change.type === 'delete' ? 'delete' : 'put',
-        key: change.key, record: change.record,
-      }).catch(() => {});
+      // A committed multi-write transaction arrives as one 'bulk' change
+      // carrying its per-write `changes`; queue each write, not one
+      // record-less bulk entry. (A plain bulk without `changes`, e.g.
+      // putAll, keeps the previous single-entry behaviour.)
+      const writes = Array.isArray(change.changes) && change.changes.length ? change.changes : [change];
+      for (const write of writes) {
+        void ibEnqueueMutation(this.db, {
+          store: write.store ?? change.store, op: write.type === 'delete' ? 'delete' : 'put',
+          key: write.key, record: write.record,
+        }).catch(() => {});
+      }
       clearTimeout(timer);
       timer = setTimeout(() => { void this.push().catch(() => {}); }, debounceMs);
     });

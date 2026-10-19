@@ -71,6 +71,34 @@ try {
   check('liveQuery refresh', liveSeen === 3);
   live.dispose();
 
+  // Transaction-bound writes were suppressed per-write; db.tx() must
+  // publish them after commit or this live query never sees WO-4.
+  let txLiveSeen = 0;
+  const txLive = db.liveQuery(() => db.from('workOrders').toArray(), ['workOrders']);
+  txLive.subscribe((rows) => { txLiveSeen = rows.length; });
+  await db.tx(['workOrders', 'assignments'], 'readwrite', async (tx) => {
+    await tx.table('workOrders').put({ id: 'WO-4', title: 'TxLive', status: 'open', createdAt: '2026-01-07' });
+    await tx.table('assignments').add({ workOrderId: 'WO-4', personId: 'P-1' });
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  check('liveQuery refresh after tx commit', txLiveSeen === 4);
+  txLive.dispose();
+
+  // Cross-tab without any sync worker: a second ordinary connection to
+  // the same database must hear the first one's writes as remote-change.
+  let remoteHeard = 0;
+  const db2 = await ibOpenDatabase({ name, version: 1, stores: ibWorkOrderStores });
+  db2.on('remote-change', () => { remoteHeard++; });
+  let crossSeen = 0;
+  const crossLive = db2.liveQuery(() => db2.from('workOrders').toArray(), ['workOrders']);
+  crossLive.subscribe((rows) => { crossSeen = rows.length; });
+  await db.table('workOrders').put({ id: 'WO-5', title: 'CrossTab', status: 'open', createdAt: '2026-01-08' });
+  await new Promise((r) => setTimeout(r, 50));
+  check('cross-tab remote-change without worker', remoteHeard >= 1);
+  check('cross-tab liveQuery refresh without worker', crossSeen === 5);
+  crossLive.dispose();
+  db2.close();
+
   db.close();
   await ibDeleteDatabase(name);
   check('cleanup', true);
