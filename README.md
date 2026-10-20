@@ -17,6 +17,11 @@ Works on IndexedDB 2 engines too — IndexedDB 3 additions
 (`indexedDB.databases()`, transaction `durability`, `getAll({query,count,direction})`,
 `getAllRecords()`) are feature-detected, never assumed.
 
+**Full documentation:** [USER_MANUAL.md](USER_MANUAL.md) — concepts,
+CRUD, query pipelines, live queries and cross-tab updates, grids,
+sync (main thread and worker), codecs, troubleshooting, and an API
+quick reference. This README is the short overview.
+
 ---
 
 ## 60-second start
@@ -99,10 +104,13 @@ await db.tx(['orders', 'stock'], 'readwrite', async (tx) => {
 }, { durability: 'strict' });   // IDB 3: fsync before commit ('relaxed' for caches)
 ```
 
+> **Classic trap:** a transaction auto-commits the moment you `await`
+> something that is not an IndexedDB request (`fetch`, timers...). Do that
+> work *before* opening the transaction.
 
 ---
 
-## Pipelines: queries at  granularity
+## Pipelines: queries at every granularity
 
 ```js
 const { rows, total, plan } = await db.from('workOrders')
@@ -286,5 +294,8 @@ closes politely on `versionchange` and rejects `ibOpenDatabase` with a clear
 | `IB_events.js` | Change bus + cross-tab BroadcastChannel |
 | `IB_schemas.js`, `IB_demo-*.js` | Examples: work-orders schema, grid/basic/worker demos |
 
+## Page indexing at zero
 
-
+The grid adapter treats `page` as **0-based** (matching current Web Awesome), and `ibOpenDatabase`
+returns the `ibDatabase` wrapper (the raw handle is `.raw`) so `db.table()`
+is available everywhere the old code passed `db` around.
