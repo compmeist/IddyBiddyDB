@@ -3,15 +3,16 @@
 //
 // The worker (IB_sync-worker.js) owns its own database connection — IndexedDB
 // is available in workers, and short transactions keep tabs/workers from
-// clashing. After each pull it broadcasts; ibCreateSyncWorker forwards that
-// into `db` as 'remote-change', which liveQuery/bindDataGrid already hear.
+// clashing. After each pull it broadcasts; `db` hears that itself as
+// 'remote-change' (installed by ibOpenDatabase), which liveQuery/bindDataGrid
+// already hear.
 
 import { ibOpenDatabase, ibCreateSyncWorker, ibBindDataGrid, ibWorkOrderStores } from './IB_index.js';
 
 const db = await ibOpenDatabase({ name: 'workdb', version: 1, stores: ibWorkOrderStores });
 
 const worker = ibCreateSyncWorker({
-  db, // forwards worker broadcasts into this Database as 'remote-change'
+  db, // this Database already hears worker broadcasts as 'remote-change'
   init: {
     db: { name: 'workdb', version: 1, stores: ibWorkOrderStores },
     sync: { baseUrl: '/api', pullPath: '/sync/pull', pushPath: '/sync/push' },

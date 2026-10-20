@@ -19,7 +19,7 @@
 // indexes: { byStatus: 'status' } }  |  legacy array form (see IB_schemas.js).
 
 import { ibIDB3Error, ibRequestToPromise, ibTxDone, ibUnwrapDB } from './IB_internal.js';
-import { ibChangeBus, ibBroadcastChange } from './IB_events.js';
+import { ibChangeBus, ibBroadcastChange, ibListenRemoteChanges } from './IB_events.js';
 import { ibTable } from './IB_table.js';
 
 export { ibTxDone, ibRequestToPromise as ibReqToPromise };
@@ -79,7 +79,9 @@ function applyStores(db, tx, stores) {
  *        Extra migration code, run inside the versionchange transaction
  *        after `stores` have been applied. Bump `version` to run it.
  * @param {(info:{oldVersion:number,newVersion:number|null})=>void} [opts.onBlocked]
- * @param {boolean} [opts.broadcast=true] - announce writes to other tabs
+ * @param {boolean} [opts.broadcast=true] - announce writes to other tabs and
+ *        hear theirs (installs the cross-tab remote-change listener; set
+ *        false to opt this connection out of cross-tab notification entirely)
  */
 export async function ibOpenDatabase({ name, version = 1, stores, schemas, upgrade, onBlocked, broadcast = true } = {}) {
   if (!name) throw new ibIDB3Error('ibOpenDatabase: `name` is required', { code: 'NO_NAME' });
@@ -117,6 +119,8 @@ export function ibDeleteDatabase(name) {
   });
 }
 
+let ibInstanceCounter = 0;
+
 export class ibDatabase {
   #tables = new Map();
 
@@ -129,8 +133,24 @@ export class ibDatabase {
     this.events = new ibChangeBus();
     this.storeDefs = new Map(storeDefs.map((s) => [s.name, s]));
     this._broadcast = broadcast;
+    // Unique sender id for cross-tab messages: lets our own remote-change
+    // listener ignore echoes of our own broadcasts (see IB_events.js).
+    this._sourceId = globalThis.crypto?.randomUUID?.()
+      ?? `ib-${++ibInstanceCounter}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // Cross-tab: ordinary initialization installs the remote-change
+    // listener, so two plain tabs refresh each other's live queries with
+    // no sync worker involved. (Previously only IB_worker-client.js
+    // installed it, so cross-tab refresh silently required the worker.)
+    // `_emitRemoteChange` only re-emits locally, so this cannot loop.
+    this._stopRemoteListener = this._broadcast
+      ? ibListenRemoteChanges(this.name, (change) => this._emitRemoteChange(change), { sourceId: this._sourceId })
+      : () => {};
     // If another tab wants to upgrade, close politely so it is not blocked.
-    raw.onversionchange = () => { raw.close(); this.events.emit('versionchange', { name: this.name }); };
+    raw.onversionchange = () => {
+      this._stopRemoteListener();
+      raw.close();
+      this.events.emit('versionchange', { name: this.name });
+    };
     raw.onclose = () => this.events.emit('close', { name: this.name });
   }
 
@@ -182,6 +202,13 @@ export class ibDatabase {
    * await something that is not an IDB request (fetch, setTimeout...).
    * Do that work BEFORE opening the transaction.
    * durability (IDB 3): 'strict' | 'relaxed' | 'default'.
+   *
+   * Change notification: writes through the tx-bound handles are buffered
+   * (see IB_table._changed) and published here only after the transaction
+   * commits — one notification per touched store (a single write keeps its
+   * exact { type, key, record } shape; several writes collapse to
+   * { type: 'bulk', keys, changes }). An aborted transaction publishes
+   * nothing, so liveQuery() subscribers never see rolled-back data.
    */
   async tx(storeNames, mode, fn, { durability } = {}) {
     const names = Array.isArray(storeNames) ? storeNames : [storeNames];
@@ -190,9 +217,34 @@ export class ibDatabase {
     try { idbTx = this.raw.transaction(names, mode, options); }
     catch { idbTx = this.raw.transaction(names, mode); } // older engines reject the options arg
     const handles = new Map(names.map((n) => [n, new ibTable(this, n, idbTx)]));
-    const api = { raw: idbTx, table: (n) => handles.get(n) ?? new ibTable(this, n, idbTx) };
+    const api = {
+      raw: idbTx,
+      table: (n) => {
+        if (!handles.has(n)) handles.set(n, new ibTable(this, n, idbTx));
+        return handles.get(n);
+      },
+    };
     const result = await fn(api);
     await ibTxDone(idbTx);
+    // Committed: flush the buffered changes, grouped per store.
+    const byStore = new Map();
+    for (const handle of handles.values()) {
+      for (const change of handle._drainChanges()) {
+        if (!byStore.has(change.store)) byStore.set(change.store, []);
+        byStore.get(change.store).push(change);
+      }
+    }
+    for (const [store, changes] of byStore) {
+      if (changes.length === 1) {
+        this._emitChange(changes[0]);
+      } else {
+        const keys = changes.flatMap((c) => [
+          ...(c.key !== undefined ? [c.key] : []),
+          ...(Array.isArray(c.keys) ? c.keys : []),
+        ]);
+        this._emitChange({ store, type: 'bulk', keys, changes });
+      }
+    }
     return result;
   }
 
@@ -202,7 +254,7 @@ export class ibDatabase {
   /** Internal: record + announce one change (also cross-tab when enabled). */
   _emitChange(change) {
     this.events.emitChange(change);
-    if (this._broadcast) ibBroadcastChange(this.name, change);
+    if (this._broadcast) ibBroadcastChange(this.name, change, this._sourceId);
   }
 
   /**
@@ -239,7 +291,10 @@ export class ibDatabase {
   /** Adopt a change announced by another tab/worker as a local event. */
   _emitRemoteChange(change) { this.events.emit('remote-change', change); }
 
-  close() { this.raw.close(); }
+  close() {
+    this._stopRemoteListener?.();
+    this.raw.close();
+  }
 }
 
 /* ------- Backwards-compatible free functions (original IB_db.js API) ------- */

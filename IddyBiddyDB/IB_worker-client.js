@@ -12,9 +12,11 @@
 //   worker.terminate();
 //
 // When the worker applies server data it broadcasts on
-// BroadcastChannel('idb3:<name>'); this client forwards those messages into
-// your Database as 'remote-change', so liveQuery() and ibBindDataGrid(live)
-// refresh automatically. No polling anywhere.
+// BroadcastChannel('idb3:<name>'). A Database from ibOpenDatabase() already
+// listens on that channel itself (see IB_db.js) and surfaces messages as
+// 'remote-change', so liveQuery() and ibBindDataGrid(live) refresh
+// automatically — this client only adds a forwarding listener for a
+// db-like object that does not already listen for itself. No polling.
 
 import { ibListenRemoteChanges } from './IB_events.js';
 
@@ -41,7 +43,11 @@ export class ibSyncWorkerClient {
     this._initPayload = init;
     this._ready = init ? this.call('init', init) : Promise.resolve(null);
     const name = db?.name ?? init?.db?.name ?? init?.name;
-    this._stopRemote = name && db?._emitRemoteChange
+    // ibDatabase installs its own remote-change listener at construction
+    // (`_stopRemoteListener`); forwarding here as well would deliver every
+    // worker broadcast twice. Only forward for db-like objects without one.
+    const dbAlreadyListens = typeof db?._stopRemoteListener === 'function';
+    this._stopRemote = name && db?._emitRemoteChange && !dbAlreadyListens
       ? ibListenRemoteChanges(name, (change) => db._emitRemoteChange(change))
       : () => {};
   }

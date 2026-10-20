@@ -25,12 +25,15 @@ export class ibTable {
    * @param {import('./IB_db.js').ibDatabase} db
    * @param {string} name store name
    * @param {IDBTransaction} [boundTx] when set, all ops join this transaction
-   *        (created by db.tx(...)); change events fire once for the batch.
+   *        (created by db.tx(...)). Change events are buffered while the
+   *        transaction is open and published by db.tx() once it commits —
+   *        once per touched store, and never on abort/rollback.
    */
   constructor(db, name, boundTx = null) {
     this.db = db;
     this.name = name;
     this._tx = boundTx;
+    this._pendingChanges = [];
   }
 
   get schema() { return this.db.schemaOf(this.name); }
@@ -56,7 +59,21 @@ export class ibTable {
     return result;
   }
 
-  _changed(change) { if (!this._tx) this.db._emitChange({ store: this.name, ...change }); }
+  _changed(change) {
+    const full = { store: this.name, ...change };
+    // Transaction-bound writes must not be announced before commit: a later
+    // abort would have already told live queries / other tabs about data
+    // that was rolled back. Buffer here; db.tx() flushes after ibTxDone().
+    if (this._tx) { this._pendingChanges.push(full); return; }
+    this.db._emitChange(full);
+  }
+
+  /** Take (and clear) the changes buffered for the bound transaction. */
+  _drainChanges() {
+    const out = this._pendingChanges;
+    this._pendingChanges = [];
+    return out;
+  }
 
   /* ---------------- single-record reads ---------------- */
 

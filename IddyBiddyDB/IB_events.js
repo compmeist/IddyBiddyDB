@@ -32,21 +32,42 @@ export class ibChangeBus extends EventTarget {
 /**
  * Listen for changes coming from other tabs / workers over BroadcastChannel.
  * Returns a stop function. Channel messages look like:
- *   { kind: 'idb3-change', change: { store, type, key } }
+ *   { kind: 'idb3-change', change: { store, type, key }, source?: string }
+ *
+ * `opts.sourceId` (or a plain string) identifies the local sender: messages
+ * carrying that same id are our own broadcasts echoed back by the channel
+ * and are ignored, so a tab never treats its own write as a remote change.
+ * Messages without a source (e.g. IB_sync-worker.js) are always accepted.
  */
-export function ibListenRemoteChanges(dbName, onChange) {
+export function ibListenRemoteChanges(dbName, onChange, opts = {}) {
   if (typeof BroadcastChannel === 'undefined') return () => {};
-  const channel = new BroadcastChannel(`idb3:${dbName}`);
+  const sourceId = typeof opts === 'string' ? opts : opts?.sourceId;
+  let channel;
+  try { channel = new BroadcastChannel(`idb3:${dbName}`); } catch { return () => {}; }
   const handler = (event) => {
-    if (event.data?.kind === 'idb3-change') onChange(event.data.change);
+    if (event.data?.kind !== 'idb3-change') return;
+    if (sourceId && event.data.source === sourceId) return;
+    onChange(event.data.change);
   };
-  channel.addEventListener('message', handler);
-  return () => { channel.removeEventListener('message', handler); channel.close(); };
+  if (typeof channel.addEventListener === 'function') channel.addEventListener('message', handler);
+  else channel.onmessage = handler;
+  return () => {
+    if (typeof channel.removeEventListener === 'function') channel.removeEventListener('message', handler);
+    if (channel.onmessage === handler) channel.onmessage = null;
+    channel.close();
+  };
 }
 
 /** Tell other tabs / workers that this tab changed something. */
-export function ibBroadcastChange(dbName, change) {
+export function ibBroadcastChange(dbName, change, sourceId) {
   if (typeof BroadcastChannel === 'undefined') return;
-  const channel = new BroadcastChannel(`idb3:${dbName}`);
-  try { channel.postMessage({ kind: 'idb3-change', change }); } finally { channel.close(); }
+  let channel;
+  try {
+    channel = new BroadcastChannel(`idb3:${dbName}`);
+    channel.postMessage(sourceId
+      ? { kind: 'idb3-change', change, source: sourceId }
+      : { kind: 'idb3-change', change });
+  } catch { /* cross-tab is best-effort; the local write already succeeded */ } finally {
+    try { channel?.close(); } catch { /* ignore */ }
+  }
 }
